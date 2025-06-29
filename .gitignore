@@ -1,0 +1,5 @@
+/anyone/
+/dataset/
+src/__pycache__/
+tmp_dataset.zip
+tests/__pycache__/

@@ -46,7 +46,6 @@ VALID_USER_IDS = sorted(orders["user_id"].dropna().unique().tolist())
 # Pick the first user for simplicity and safety
 DEFAULT_USER_ID = VALID_USER_IDS[0]
 
-# TODO
 @tool
 def structured_search_tool(
     product_name: Optional[str] = None,
@@ -179,7 +178,96 @@ def structured_search_tool(
     LLM Usage Note:
     This tool is ideal for filtered browsing, purchase history analysis, or category breakdowns.
     """
-    pass
+    try:
+        # Start with products base dataframe
+        df = products.copy()
+        
+        # Join with departments and aisles to get metadata
+        df = df.merge(departments, on='department_id', how='left')
+        df = df.merge(aisles, on='aisle_id', how='left')
+        
+        # If history_only is True, filter to user's purchase history
+        if history_only:
+            user_id = get_user_id()
+            if user_id is None:
+                return [{"error": "No user ID set. Use set_user_id() first."}]
+            
+            # Get user's orders
+            user_orders = orders[orders['user_id'] == user_id]
+            if user_orders.empty:
+                return [{"error": f"No orders found for user {user_id}"}]
+            
+            # Join with prior orders to get product purchase data
+            user_purchases = prior.merge(user_orders, on='order_id', how='inner')
+            
+            # Calculate statistics per product
+            stats = user_purchases.groupby('product_id').agg({
+                'order_id': 'count',  # Total times ordered
+                'reordered': ['sum', 'mean'],  # Reorder count and rate
+                'add_to_cart_order': 'mean'  # Average cart position
+            }).round(2)
+            
+            # Flatten column names
+            stats.columns = ['count', 'reorder_count', 'reorder_rate', 'add_to_cart_order']
+            stats = stats.reset_index()
+            
+            # Add reordered boolean flag
+            stats['reordered'] = stats['reorder_count'] > 0
+            
+            # Filter df to only products the user has purchased
+            df = df[df['product_id'].isin(stats['product_id'])]
+            
+            # Merge statistics with product info
+            df = df.merge(stats, on='product_id', how='left')
+        
+        # Apply filters
+        if product_name:
+            df = df[df['product_name'].str.contains(product_name, case=False, na=False)]
+        
+        if department:
+            df = df[df['department'] == department]
+        
+        if aisle:
+            df = df[df['aisle'].str.lower().str.contains(aisle.lower(), na=False)]
+        
+        if history_only and reordered is not None:
+            df = df[df['reordered'] == reordered]
+        
+        if history_only and min_orders is not None:
+            df = df[df['count'] >= min_orders]
+        
+        # Handle grouping
+        if group_by:
+            if group_by == "department":
+                grouped = df.groupby('department').size().reset_index(name='num_products')
+                return grouped.to_dict('records')
+            elif group_by == "aisle":
+                grouped = df.groupby('aisle').size().reset_index(name='num_products')
+                return grouped.to_dict('records')
+        
+        # Apply sorting if history_only and order_by specified
+        if history_only and order_by:
+            df = df.sort_values(by=order_by, ascending=ascending)
+        
+        # Apply top_k limit
+        if top_k:
+            df = df.head(top_k)
+        
+        # Select relevant columns for output
+        base_columns = ['product_id', 'product_name', 'aisle', 'department']
+        if history_only:
+            # Add history-specific columns
+            history_columns = ['count', 'reordered', 'reorder_count', 'reorder_rate', 'add_to_cart_order']
+            columns = base_columns + [col for col in history_columns if col in df.columns]
+        else:
+            columns = base_columns
+        
+        # Return as list of dictionaries
+        result = df[columns].to_dict('records')
+        return result
+        
+    except Exception as e:
+        return [{"error": f"Error in structured search: {str(e)}"}]
 
 
 # TODO
@@ -234,14 +322,22 @@ _vector_store = None
 
 
 def get_vector_store():
-    pass
+    global _embeddings, _vector_store
+    if _vector_store is None:
+        if _embeddings is None:
+            _embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        _vector_store = Chroma(
+            collection_name=CHROMA_COLLECTION,
+            embedding_function=_embeddings,
+            persist_directory=CHROMA_DIR
+        )
+    return _vector_store
 
 
 def make_query_prompt(query: str) -> str:
     return f"Represent this sentence for searching relevant passages: {query.strip().replace(chr(10), ' ')}"
 
 
-# TODO
 def search_products(query: str, top_k: int = 5):
     """
     Perform a semantic vector search over the product catalog using HuggingFace embeddings and Chroma.
@@ -284,10 +380,30 @@ def search_products(query: str, top_k: int = 5):
     ]
     ```
     """
-    pass
+    # Wrap the query using the required function
+    query_text = make_query_prompt(query)
+    
+    # Get the vector store
+    vector_store = get_vector_store()
+    
+    # Perform similarity search
+    documents = vector_store.similarity_search(query_text, k=top_k)
+    
+    # Convert results to the required format
+    results = []
+    for doc in documents:
+        result = {
+            "product_id": int(doc.metadata.get("product_id", 0)),
+            "product_name": doc.metadata.get("product_name", ""),
+            "aisle": doc.metadata.get("aisle", ""),
+            "department": doc.metadata.get("department", ""),
+            "text": doc.page_content
+        }
+        results.append(result)
+    
+    return results
 
 
-# TODO
 @tool
 def search_tool(query: str) -> str:
     """
@@ -343,7 +459,23 @@ def search_tool(query: str) -> str:
     search_tool("something high protein for breakfast")
     ```
     """
-    pass
+    # Perform the search
+    results = search_products(query)
+    
+    # If no results, return appropriate message
+    if not results:
+        return "No products found matching your search."
+    
+    # Format results into a human-readable string
+    formatted_results = []
+    for result in results:
+        formatted_result = f"- {result['product_name']} (ID: {result['product_id']})\n"
+        formatted_result += f"  Aisle: {result['aisle']}\n"
+        formatted_result += f"  Department: {result['department']}\n"
+        formatted_result += f"  Details: {result['text']}"
+        formatted_results.append(formatted_result)
+    
+    return "\n\n".join(formatted_results)
 
 
 # ---- UPDATED: Cart tools with quantity support ----
@@ -472,7 +604,6 @@ def handle_tool_error(state: Dict[str, Any]) -> dict:
     }
 
 
-# TODO
 def create_tool_node_with_fallback(tools: list) -> ToolNode:
     """
     Build a LangGraph ToolNode that can handle errors gracefully using a fallback strategy.
@@ -495,7 +626,16 @@ def create_tool_node_with_fallback(tools: list) -> ToolNode:
     Returns:
     - ToolNode: A LangGraph-compatible tool node with error fallback logic.
     """
-    pass
+    # Create the base tool node
+    tool_node = ToolNode(tools)
+    
+    # Attach fallback error handling
+    tool_node_with_fallback = tool_node.with_fallbacks(
+        [RunnableLambda(handle_tool_error)], 
+        exception_key="error"
+    )
+    
+    return tool_node_with_fallback
 
 
 __all__ = [

@@ -45,7 +45,6 @@ support_runnable = support_prompt.partial(time=datetime.now) | llm.bind_tools(
     support_tools
 )
 
-# TODO
 def sales_assistant(state: State, config: RunnableConfig, runnable=sales_runnable) -> dict:
     """
     LangGraph node function for running the sales assistant LLM agent.
@@ -71,7 +70,9 @@ def sales_assistant(state: State, config: RunnableConfig, runnable=sales_runnabl
     - A dictionary with a `"messages"` key containing the new AI message(s).
     Example: `{"messages": [AIMessage(...)]}`
     """
-    pass
+    set_thread_id(config["configurable"]["thread_id"])
+    set_user_id(DEFAULT_USER_ID)
+    return {"messages": runnable.invoke(state, config=config)}
 
 
 def support_assistant(state: State, config: RunnableConfig) -> dict:
